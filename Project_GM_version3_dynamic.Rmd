@@ -1,0 +1,245 @@
+---
+title: "Project_GM"
+author: "Jinhao Zou"
+date: "4/18/2020"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r}
+library(useful)
+#install.packages("metaSEM")
+library(metaSEM)
+#install.packages("combinat")
+#install.packages("rlist")
+library(combinat)
+library(rlist)
+library(ergm)
+```
+
+
+#preparing functions
+## changable parameters for edges
+```{r}
+#average distance among people. normal distance: 1m, after social distance: 5m, rnorm(500*499/2, distance, var)
+#cretiria: keep all edges < 2m.
+Dist_matrix <- function(n = 100, dis_family = 0.1, dis_close = 0.5, dis_B = 1, RelShp = RelShp,...){
+  Socdis_B <- matrix(abs(rnorm(n*n, dis_B, 0.01)) + 0.0001, n, n)
+  Socdis_close <- matrix(abs(rnorm(n*n, dis_close, 0.1)) + 0.0001, n, n)
+  Socdis_family <- matrix(abs(rnorm(n*n, dis_family, 1)) + 0.0001, n, n)
+  Socdis <- Socdis_B * (RelShp == 3) + Socdis_close * (RelShp == 2) + Socdis_family * (RelShp == 1)
+  Socdis[lower.tri(Socdis)] <- 0
+  Socdis <- Socdis + t(Socdis)
+  diag(Socdis) <- 1
+  return(Socdis)
+}
+```
+
+
+```{r}
+#the contact network among all people: people meet all other with p_meet
+## Base meet rate: if people hang out around normally, the chance of people meet strangers. 
+p_meet_B <- 0.01
+## Close friends or calssmates meet each other 
+p_meet_close <- 0.1
+## Family members meet each other
+p_meet_family <- 1
+
+Net_matrix <- function(n = 100, p_meet_B = 0.01, p_meet_close = 0.1, p_meet_family = 1, RelShp = RelShp,...){
+  net_mtx_B <- matrix(rbinom(n*n, 1 , p_meet_B), n, n)
+  net_mtx_close <- matrix(rbinom(n*n, 1 , p_meet_close), n, n)
+  net_mtx_family <- matrix(rbinom(n*n, 1 , p_meet_family), n, n)
+  
+  net_mtx <- net_mtx_B * (RelShp == 3) + net_mtx_close * (RelShp == 2) + net_mtx_family * (RelShp == 1)
+  
+  net_mtx[lower.tri(net_mtx)] <- 0
+  net_mtx <- net_mtx + t(net_mtx)
+  diag(net_mtx) <- 0
+  return(net_mtx)
+}
+```
+
+
+```{r}
+#if perple get infected, how many person will be infeted by them
+virus_deliver <- function(pt = pt, social_distance = F, dis_thre = 2, n = 100, RelShp = RelShp, IR_B = 5, ManStra = 1,...){
+  if(!social_distance){
+    #if without the social distance, people is connected with defaut social distance and defaut social network
+    net_mtx <- Net_matrix(n = n, RelShp = RelShp)
+    socdis_mtx <- Dist_matrix(n = n, RelShp = RelShp)
+  }else{
+    #if with social distance:
+    #people with close relationship with meet with same as strangers, and distance of close and stranger group increase
+    net_mtx <- Net_matrix(n =n, p_meet_B = 0.01, p_meet_close = 0.01, p_meet_family = 1,RelShp = RelShp)
+    socdis_mtx <- Dist_matrix(n = n, dis_family = 0.1, dis_close = 1, dis_B = 3,RelShp = RelShp)
+  }
+
+  #only the people has less than 2m social distance has probability to get the virus
+  #The matrix for possible way of virus delivery
+  dis_thre_mtx <- matrix(abs(rnorm(n*n, dis_thre, 1)), n, n)
+  dis_thre_mtx[lower.tri(dis_thre_mtx)] <- 0
+  dis_thre_mtx <- dis_thre_mtx + t(dis_thre_mtx)
+  diag(dis_thre_mtx) <- 0
+  net_mtx_dis <- net_mtx * (socdis_mtx < dis_thre_mtx)
+  net_mtx_dis[-pt, -pt] <- 0
+  
+  #The matrix for people how easy get infected if they meet the virus
+  #the rate of people get infected is also propotion to the 1/ dis
+  infect_rate <- as.vector(IR_B*ManStra*1/socdis_mtx)
+  infect_rate[infect_rate >= 1] <- 1
+  infect_mtx <- matrix(sapply(infect_rate, FUN = function(x) rbinom(1,1,x)), n, n)
+
+  
+  #only part of the people with virus can be infected
+  pt_infect_mtx <- Matrix::forceSymmetric(net_mtx_dis*infect_mtx,uplo="L")
+  
+
+  return(pt_infect_mtx)
+  
+}
+```
+
+## generate family matrix
+```{r}
+#generate family matrix
+generate_family<-function(f_n, f_mean= 3.14 ,f_sd=1,...){
+    f_group<-round(rnorm(f_n,f_mean,f_sd))
+    i<-1
+    family<-matrix(0,nrow=sum(f_group),ncol=sum(f_group))
+    for(j in f_group){
+        family[i:(i+j-1),i:(i+j-1)]<-1
+        i=i+j
+        if( i > n){break}
+        }
+    diag(family)<-0
+    Ture_family <- family[1:f_n,1:f_n]
+    return(list(matrix=Ture_family, num_edges = sum(Ture_family)/2))
+}
+```
+
+
+# Ture simulation function
+```{r}
+# variables you want to change:
+# Whether want to have social distance: social_distance
+# want to see the result of which day: Day
+# number of population you want to simulate: n
+
+#other parameter you might be interested in like the properties of infection
+## Base infection rate: if the people contact, what is the chance of people get infected: IR_B (this value should be lower then 1)
+## manipulate strateges: like wash hand and wear gloves, wear masks can lower the final infection rate: ManStra (more manipulate strateges involves, this value should be lower, also this value should be lower than 1)
+## the threshold of determine whether people will be infected: dis_thre (this values is lower, then less people will be think they are contacted)
+
+Sim <- function(social_distance = F, days = 10, n = 100, IR_B = 1, ManStra = 1, dis_thre = 2,... ){
+
+set.seed(1234)
+#population properties  
+##relation ship close or not. family: 1, close: 2, stranger: 3
+RelShp <- vec2symMat(sample(c(2,3), n*(n+1)/2, replace = T, p = c(20/n, (n-20)/n)))
+diag(RelShp) <- 0   
+my_family<-generate_family(n, f_mean = 3, f_sd=1)
+RelShp <- (1-(my_family$matrix==1))*RelShp+my_family$matrix
+
+#print(sum(RelShp == 1)/(n*n))
+
+###test: the figure of family####
+#Relfamily <- ifelse(RelShp > 1, 0, RelShp)
+#netfamily <- as.network(Relfamily)
+#plot(netfamily)
+
+pt <- sample(n,1)
+
+infect_mtx <- matrix(0, n, n)
+net_geodist <- matrix(0, n-1, days)
+
+for(i in 1:days){
+  print(i)
+  pt_matrix <- as.matrix(virus_deliver(n = n, pt = pt, social_distance = social_distance, dis_thre = dis_thre, RelShp = RelShp, IR_B = IR_B, ManStra = ManStra))
+  pt <- unique(c(pt,which(colSums(pt_matrix) != 0)))
+  infect_mtx <- infect_mtx + pt_matrix
+  infect_mtx <= ifelse(infect_mtx > 1, 1, infect_mtx)
+  #network of infection path after i days
+  infect_net_one <- as.network(x =infect_mtx, directed = F, loops = FALSE, matrix.type = "adjacency")
+  plot(infect_net_one, cex.main = 0.8, main = paste('total infected numbers', "of Day", i ,"is", length(pt) ))
+  
+  #get the ergm distance
+  net_geodist[,i] <- ergm.geodistdist(infect_net_one)[-n]
+}
+
+
+#final network after signed days 
+infect_net <- as.network(x =infect_mtx, directed = F, loops = FALSE, matrix.type = "adjacency")
+
+return(list(num_pt = length(pt), infect_net = infect_net, net_geodist = as.data.frame(net_geodist) ))
+}
+
+```
+
+
+
+```{r}
+#https://rdrr.io/cran/ergm/man/ergm-terms.html
+library(ergm)
+N <- 100 # Number of population members
+initial.network <- matrix(rbinom(N * N, 1, .1), N, N) # Initial network
+diag(initial.network) <- 0 # Exclude self-edges
+initial.network <- network(initial.network, directed=FALSE) # Transform into network object
+household <- vector(length = 100) # Construct household indicator
+household <- c(1:100)
+set.vertex.attribute(initial.network, "household", household) # Add "household" to the network object
+propensities.edges <- rexp(rate=1, n=N-1)
+sim_net <- simulate(initial.network ~ edges + sociality + nodematch("household"), coef =  c(-2, propensities.edges, 1))
+```
+
+```{r}
+g.sim <- simulate(network(16) ~ edges + mutual, coef=c(0, 0))
+#
+# What are the statistics like?
+#
+summary(g.sim ~ edges + mutual)
+#
+# Now simulate a network with higher mutuality
+#
+g.sim <- simulate(network(16) ~ edges + mutual, coef=c(0,2))
+#
+# How do the statistics look?
+#
+summary(g.sim ~ edges + mutual)
+#
+# Let's draw from a Bernoulli model with 16 nodes
+# and tie probability 0.1
+#
+g.use <- network(16,density=0.1,directed=FALSE)
+#
+# Starting from this network let's draw 3 realizations
+# of a edges and 2-star network
+g.sim <- simulate(~edges+kstar(2), nsim=3, coef=c(-1.8,0.03),
+               basis=g.use, control=control.simulate(
+                 MCMC.burnin=1000,
+                 MCMC.interval=100))
+g.sim
+summary(g.sim)
+```
+
+
+#Sample simulations:
+```{r}
+#without social distance
+result <- Sim( days = 10, n = 100)
+print(paste('total infected numbers:',result$num_pt))
+#plot(result$infect_net, cex.main = 0.8)
+boxplot(result$net_geodist)
+```
+
+```{r}
+#with social distance
+result <- Sim(social_distance = T, days = 10, n = 100)
+print(paste('total infected numbers:',result$num_pt))
+#plot(result$infect_net, cex.main = 0.8)
+boxplot(result$net_geodist)
+```
+
+
